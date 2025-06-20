@@ -1,34 +1,67 @@
 import streamlit as st
-import os
-from dotenv import load_dotenv
-from llm import get_ai_message
+from youtube_agent import graph, graph_memory, continue_with_memory, memory
+import uuid
+import json
 
-st.set_page_config(
-    page_title="유튜브 분석 챗봇",
-    page_icon=":guardsman:",
-)
+def _clean_and_parse_json(content: str) -> dict:
+    """LLM의 응답에서 마크다운을 제거하고 JSON으로 파싱합니다."""
+    if content.strip().startswith("```json"):
+        start_index = content.find('{')
+        end_index = content.rfind('}')
+        if start_index != -1 and end_index != -1:
+            content = content[start_index : end_index + 1]
+    
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # 파싱 실패 시 원본 텍스트나 에러 메시지를 포함한 객체를 반환할 수 있습니다.
+        return {"original_content": content}
 
-st.title("유튜브 분석 챗봇")
-st.caption("유튜브 영상의 스크립트 요약과 댓글 리포트를 생성해 드립니다.")
+# 세션 상태에 thread_id 없으면 새로 생성
+if 'thread_id' not in st.session_state:
+    st.session_state.thread_id = str(uuid.uuid4())
 
-load_dotenv()
+# config에 넣기
+config = {"configurable": {"thread_id": st.session_state.thread_id}}
 
-if "message_list" not in st.session_state:
-    st.session_state.message_list = []
+st.write(f"현재 thread_id: {st.session_state.thread_id}")
 
-for message in st.session_state.message_list:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
+st.title("YouTube 요약 에이전트 (스크립트 + 댓글)")
 
-if user_question := st.chat_input(placeholder="유튜브 URL을 입력하거나 분석 요청을 해보세요."):
-    with st.chat_message("user"):
-        st.write(user_question)
-    st.session_state.message_list.append({"role": "user", "content": user_question})
+# 1) URL 입력 받기
+url_input = st.text_input("YouTube 영상 URL을 입력하세요", "")
 
-    with st.spinner("AI가 답변을 생성하는 중입니다..."):
-        ai_response_stream = get_ai_message(user_question)
-        ai_message = ""
-        for chunk in ai_response_stream:
-            ai_message = chunk  # 마지막 chunk만 저장 (스트림이지만 대부분 1회)
-            st.write(ai_message)
-        st.session_state.message_list.append({"role": "ai", "content": ai_message})
+if url_input:
+    initial_state = {"url": url_input}
+    
+    if st.button("스크립트 요약 요청"):
+        with st.spinner("스크립트 요약 중..."):
+            step1_state = graph.invoke(initial_state, config=config)
+            script_summary = _clean_and_parse_json(step1_state.get("script_summary"))
+            if script_summary:
+                st.markdown("### 📄 스크립트 요약 결과")
+                st.json(script_summary)
+            else:
+                st.warning("스크립트 요약 결과가 없습니다.")
+            
+            # memory.set_state(step1_state, config)  # <-- 이 줄 삭제
+    
+    st.markdown("---")
+    reply_input = st.text_input("댓글 요약을 원하시면 여기에 답변을 입력하세요 (예: 응, 네, 보여줘 등)")
+
+    if reply_input:
+        previous_state = initial_state
+        
+        update_state = {"reply": reply_input, "url": previous_state.get("url")}
+        
+        if st.button("댓글 요약 요청"):
+            with st.spinner("댓글 요약 중..."):
+                step2_state = continue_with_memory(graph, initial_state, config, update_state)
+                comment_summary = step2_state.get("comment_summary")
+                if comment_summary:
+                    st.markdown("### 💬 댓글 요약 결과")
+                    st.write(comment_summary)
+                else:
+                    st.warning("댓글 요약 결과가 없습니다.")
+
+print(dir(memory))
